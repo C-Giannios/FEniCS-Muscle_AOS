@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+
+# Simulation outputs
+output/
+output_*/
+test_*/
+sweep_*/
+
+# FEniCS / mesh outputs
+*.xdmf
+*.h5
+*.bp
+*.msh
+*.vtu
+*.pvd
