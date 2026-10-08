@@ -18,3 +18,9 @@ sweep_*/
 *.msh
 *.vtu
 *.pvd
+
+# Generated simulation and postprocessing results
+outputs/
+
+# Jupyter temporary files
+.ipynb_checkpoints/

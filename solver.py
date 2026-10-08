@@ -33,11 +33,14 @@ class Params:
     E: float = 1.0
     nu: float = 0.3
     xi: float = 1.0
+
     # Nematic
     A: float = 1.0
     K: float = 0.05
     Gamma: float = 1.0
     zeta: float = -0.5          # ζ < 0 => contractile
+    lambda_coupling: float = 1.0  # coefficient of WQ-QW; -1 gives legacy rotation
+
     # Actuation
     d0: float = 0.1
     T: float = 5.0
@@ -45,6 +48,7 @@ class Params:
     dt: float = 0.02
     t_end: float = 15.0
     save_every: int = 5
+
     # Output
     outdir: str = "output"
 
@@ -184,14 +188,14 @@ def run(p: Params, mesh=None, cell_tags=None, facet_tags=None, verbose=True):
     Hb_xx = A_c * (1.0 - S2_n) * Q_n[0]
     Hb_xy = A_c * (1.0 - S2_n) * Q_n[1]
 
-    # Corotation rotates the director's phase 2*theta at rate 2*w_spin. A
-    # forward-Euler increment (Q^n + dt*2*w*[Qxy,-Qxx]) linearizes this
-    # rotation and is NOT magnitude-preserving: for w*dt = O(1) it inflates
-    # |Q| every step (the standard explicit-Euler-on-a-rotation instability),
-    # which blows up at higher activity/finer meshes where w is larger.
-    # Apply the exact rotation by angle 2*w*dt instead -- unconditionally
-    # stable and exactly S^2-preserving regardless of w*dt.
-    rot_angle = 2.0 * w_spin * dt_c
+
+    # lambda*(WQ-QW) gives d(Qxx,Qxy)/dt = 2*lambda*w*(Qxy,-Qxx).
+    # Hence the component phase 2*theta rotates at rate -2*lambda*w.
+    # Apply the exact frozen-spin rotation, preserving Qxx^2 + Qxy^2
+    # pointwise in this substep. lambda=-1 reproduces the legacy rotation.
+
+
+    rot_angle = -2.0 * p.lambda_coupling * w_spin * dt_c
     cos_r = ufl.cos(rot_angle)
     sin_r = ufl.sin(rot_angle)
     Q_rot_xx = cos_r * Q_n[0] - sin_r * Q_n[1]

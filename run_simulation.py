@@ -27,6 +27,13 @@ def parse_args():
     p.add_argument("--t_end", type=float, default=15.0, help="total simulated time")
     p.add_argument("--save_every", type=int, default=5, help="save every N steps")
     p.add_argument("--outdir", type=str, default="output", help="output directory")
+    p.add_argument(
+        "--lambda_coupling",
+        type=float,
+        default=1.0,
+        help="coefficient of WQ-QW: 0 disables corotation; -1 gives legacy rotation",
+    )
+
     return p.parse_args()
 
 
@@ -38,6 +45,7 @@ def main():
         d0=args.d0, T=args.T,
         dt=args.dt, t_end=args.t_end, save_every=args.save_every,
         outdir=args.outdir,
+        lambda_coupling=args.lambda_coupling,
     )
 
     tau_el, tau_Q = params.derived_timescales()
