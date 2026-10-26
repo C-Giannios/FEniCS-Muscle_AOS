@@ -55,16 +55,23 @@ $$
 $$
 
 $$
-\sigma_{\text{active}} = -\zeta Q, \qquad \zeta < 0 \text{ for contractile activity}
+\sigma_{\text{active}} = -\zeta_{\mathrm{eff}} Q, \qquad \zeta_{\mathrm{eff}} < 0 \text{ for contractile activity}
 $$
 
-**Nematic** — relaxational (Landau-de Gennes) dynamics + corotation with the
-local material spin:
+Here `zeta_eff = zeta - gamma` includes the coupling stress `+gamma Q`;
+`zeta_eff` and `gamma` are independent inputs. No separate coupling stress is added.
+
+**Nematic** — relaxational (Landau-de Gennes) dynamics with strain-orientation coupling:
 
 $$
-\partial_t Q = \Gamma H + \lambda(W \cdot Q - Q \cdot W), \qquad
+\partial_t Q = \Gamma H, \qquad
 H = A\left[Q - \tfrac{1}{2}(Q\!:\!Q)\,Q\right] + K \nabla^2 Q
+- \gamma\left[\varepsilon(u)-\tfrac12\mathrm{tr}(\varepsilon(u))I\right]
 $$
+
+The coupling energy is `F_c = ∫ gamma Q:eps(u) dA`.
+The existing corotation term `λ(WQ-QW)` is retained in code but disabled
+(`lambda_coupling = 0`). Its definitions are:
 
 $$
 W = \mathrm{skew}(\nabla v), \qquad v = \partial_t u
@@ -74,8 +81,8 @@ Writing `S² = Qxx² + Qxy²` and `w` the scalar spin with
 `W = [[0, w], [-w, 0]]`, `w = ½(∂vx/∂y − ∂vy/∂x)`:
 
 $$
-H_{xx} = A(1-S^2)Q_{xx} + K\nabla^2 Q_{xx}, \qquad
-H_{xy} = A(1-S^2)Q_{xy} + K\nabla^2 Q_{xy}
+H_{xx} = A(1-S^2)Q_{xx} + K\nabla^2 Q_{xx} - \tfrac{\gamma}{2}(\varepsilon_{xx}-\varepsilon_{yy}), \qquad
+H_{xy} = A(1-S^2)Q_{xy} + K\nabla^2 Q_{xy} - \gamma\varepsilon_{xy}
 $$
 
 $$
@@ -85,7 +92,7 @@ $$
 
 i.e. corotation rotates the director's phase `2θ` at rate `-2λw` — the two
 scalar components decouple into two Helmholtz-type problems (no tensor
-solve needed). The equilibrium `S=1` matches the 45° anchoring
+solve needed). The uncoupled bulk equilibrium `S=1` matches the 45° anchoring
 `(Qxx,Qxy)=(0,1)` exactly.
 
 ### Boundary / initial conditions
@@ -110,18 +117,20 @@ a(u,w) = \int \left[\tfrac{\xi}{\Delta t}u\cdot w + \lambda^*\mathrm{tr}(\vareps
 $$
 
 $$
-L(w) = \int \left[\tfrac{\xi}{\Delta t}u^n\cdot w + \zeta Q^n\!:\!\varepsilon(w)\right] dx
+L(w) = \int \left[\tfrac{\xi}{\Delta t}u^n\cdot w + \zeta_{\mathrm{eff}} Q^n\!:\!\varepsilon(w)\right] dx
 $$
 
-2. `v^{n+1} = (u^{n+1}-u^n)/\Delta t`, `w^{n+1}` from `grad(v)` (UFL
-   expression, no separate `Function`).
-3. **Nematic** (implicit Laplacian, explicit bulk, exact frozen-spin corotation):
+   The nonpassive RHS term is `-inner(sigma_active(Q_n), eps(w_test))`.
+   Output uses the same stress law, evaluated with the updated `u` and `Q`.
+
+2. Evaluate `eps(u^{n+1})` directly from the CG2 mechanics solution.
+3. **Nematic** (implicit Laplacian, explicit bulk, strain coupling using `u^{n+1}`):
 
 $$
 a(Q,q) = \int\left[Q\cdot q + \Delta t\,\Gamma K\,\nabla Q\!:\!\nabla q\right]dx
 $$
 
-   The corotation part of the right-hand side is **not** the naive
+   The retained corotation implementation (currently disabled) is **not** the naive
    forward-Euler increment `Q^n + 2λ\Delta t\, w[Q_{xy}^n,-Q_{xx}^n]`: that
    linearization of a rotation is not magnitude-preserving, and inflates
    `|Q|` every step, especially when `|λw\Delta t| = O(1)` — an explicit-Euler-on-a-rotation
@@ -135,25 +144,34 @@ Q^{\text{rot}}_{xy} = \sin\alpha\,Q_{xx}^n + \cos\alpha\,Q_{xy}^n
 $$
 
 $$
-L(q) = \int\left[\left(Q^{\text{rot}}_{xx} + \Delta t\,\Gamma H^{\text{bulk},n}_{xx}\right)q_{xx} + \left(Q^{\text{rot}}_{xy} + \Delta t\,\Gamma H^{\text{bulk},n}_{xy}\right)q_{xy}\right]dx
+L(q) = \int\left[\left(Q^{\text{rot}}_{xx} + \Delta t\,\Gamma (H^{\text{bulk},n}_{xx}+H^{n+1}_{c,xx})\right)q_{xx} + \left(Q^{\text{rot}}_{xy} + \Delta t\,\Gamma (H^{\text{bulk},n}_{xy}+H^{n+1}_{c,xy})\right)q_{xy}\right]dx
 $$
 
-   Here `H_bulk = A(1-S²)Q` is evaluated at `Q^n`.
+   Here `H_bulk = A(1-S²)Q` is evaluated at `Q^n`, and
+   `H_c = -gamma [eps(u) - tr(eps(u)) I/2]` at `u^{n+1}`.
+   With `λ=0`, `Q_rot = Q^n`.
    The rotation alone exactly preserves `S²` pointwise.
 
 ## Parameters
 
 All exposed as named constants/dataclass fields (`mesh_gen.py`,
 `solver.py::Params`): `L, H` (geometry); `E, nu` (elasticity); `xi`
-(drag); `A, K, Gamma, zeta, lambda_coupling` (nematic); `d0, T` (wall actuation); `dt,
+(drag); `A, K, Gamma, gamma, zeta_eff, lambda_coupling` (nematic); `d0, T` (wall actuation); `dt,
 t_end`. Derived timescales `tau_el ~ xi*L^2/E` and `tau_Q ~ 1/(Gamma*A)`
 are printed at the start of each run.
 
-`lambda_coupling` (λ) defaults to `1.0`: `+1` gives `WQ-QW`, `0` disables
-corotation, and `-1` reproduces the legacy implementation. Set it with
-`--lambda_coupling`; both signs are supported.
+`gamma` defaults to `0.0`; `zeta_eff` defaults to `-0.5` (negative: contractile;
+positive: extensile). `--zeta` is a deprecated alias for `--zeta_eff`.
 
-**Activity guidance** (legacy coupling, `λ=-1`): with `A=1, K=0.05, Gamma=1`, `zeta`
+`lambda_coupling` (λ) defaults to `0.0`; nonzero values are rejected.
+Future use of corotation requires the corresponding antisymmetric stress.
+
+Use either `--epsilon0` or `--d0`, with `epsilon0 = d0/(2L)`.
+If neither is supplied, `d0=0.1`. This nominal amplitude is distinct from
+the signed local strain tensor used in the coupling.
+
+**Historical activity guidance** (before the mechanical sign correction,
+`λ=-1`; not validated for the current model): with `A=1, K=0.05, Gamma=1`, `zeta`
 around `-0.5` to `-0.6` gives a clean, single-region contractile effect
 (order parameter `S` stays above ~0.85 everywhere, deformation and stress
 concentrate smoothly at the tip). Beyond `zeta ~ -0.7` the stress and
@@ -191,7 +209,7 @@ Apptainer:
 ```bash
 apptainer pull dolfinx_v0.9.0.sif docker://dolfinx/dolfinx:v0.9.0
 apptainer exec dolfinx_v0.9.0.sif python3 run_simulation.py \
-    --zeta -0.6 --d0 0.1 --t_end 15 --lambda_coupling -1 --outdir output_zeta0.6
+    --zeta_eff -0.6 --gamma 0 --epsilon0 0.05 --t_end 15 --outdir output_strain_model
 ```
 
 Then open `postprocess.ipynb` (point `OUTDIR` at the run's output

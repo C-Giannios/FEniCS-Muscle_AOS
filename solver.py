@@ -5,17 +5,21 @@ solid (overdamped mechanics, plane stress).
 
 Each time step:
   1. Mechanics: backward-Euler solve for u^{n+1}, using Q^n (lagged) for the
-     active stress and the current wall displacement d(t^{n+1}) as a
+     effective nonpassive stress and the current wall displacement d(t^{n+1}) as a
      Dirichlet BC on the actuated wall. Purely linear elasticity solve.
-  2. Corotation: v^{n+1} = (u^{n+1} - u^n)/dt, W^{n+1} = skew(grad v^{n+1}).
+  2. Strain: evaluate eps(u^{n+1}) for the strain-orientation coupling.
   3. Nematic: backward-Euler on the Frank-elastic (Laplacian) term, explicit
-     on the bulk (Landau-de Gennes) term and the corotation term (both
-     evaluated with Q^n). Also linear.
+     on the bulk (Landau-de Gennes) term using Q^n, with strain coupling
+     evaluated using u^{n+1}. Also linear.
+
+The corotation implementation is retained, but lambda_coupling must be zero
+in the current model.
 
 All physical parameters are passed in via a Params dataclass (see
 run_simulation.py) so this module has no hard-coded constants.
 """
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+import json
 import numpy as np
 import ufl
 import basix.ufl
@@ -38,8 +42,9 @@ class Params:
     A: float = 1.0
     K: float = 0.05
     Gamma: float = 1.0
-    zeta: float = -0.5          # ζ < 0 => contractile
-    lambda_coupling: float = 1.0  # coefficient of WQ-QW; -1 gives legacy rotation
+    gamma: float = 0.0  # strain–orientation coupling
+    zeta_eff: float = -0.5  # < 0 contractile; > 0 extensile
+    lambda_coupling: float = 0.0  # corotation disabled in the current model
 
     # Actuation
     d0: float = 0.1
@@ -67,6 +72,13 @@ def wall_displacement(t: float, p: Params) -> float:
 
 
 def run(p: Params, mesh=None, cell_tags=None, facet_tags=None, verbose=True):
+    if p.lambda_coupling != 0.0:
+        raise ValueError(
+            "The current strain-coupled model requires lambda_coupling=0. "
+            "Nonzero corotation requires a future extension including "
+            "the corresponding antisymmetric stress."
+        )
+
     comm = MPI.COMM_WORLD
 
     if mesh is None:
@@ -112,10 +124,11 @@ def run(p: Params, mesh=None, cell_tags=None, facet_tags=None, verbose=True):
         """Build the full traceless-symmetric 2x2 tensor from (Qxx, Qxy)."""
         return ufl.as_matrix([[Q[0], Q[1]], [Q[1], -Q[0]]])
 
-    zeta_c = fem.Constant(mesh, PETSc.ScalarType(p.zeta))
+    zeta_eff_c = fem.Constant(mesh, PETSc.ScalarType(p.zeta_eff))
 
     def sigma_active(Q):
-        return -zeta_c * Q_tensor(Q)
+        """Effective nonpassive stress; includes the coupling-stress contribution."""
+        return -zeta_eff_c * Q_tensor(Q)
 
     # ------------------------------------------------------------------
     # Boundary conditions -- mechanics
@@ -160,6 +173,7 @@ def run(p: Params, mesh=None, cell_tags=None, facet_tags=None, verbose=True):
     A_c = fem.Constant(mesh, PETSc.ScalarType(p.A))
     K_c = fem.Constant(mesh, PETSc.ScalarType(p.K))
     Gamma_c = fem.Constant(mesh, PETSc.ScalarType(p.Gamma))
+    gamma_c = fem.Constant(mesh, PETSc.ScalarType(p.gamma))
 
     # ------------------------------------------------------------------
     # Mechanics weak form
@@ -170,7 +184,7 @@ def run(p: Params, mesh=None, cell_tags=None, facet_tags=None, verbose=True):
     a_u = (xi_c / dt_c) * ufl.inner(u_trial, w_test) * ufl.dx \
         + ufl.inner(sigma_passive(u_trial), eps(w_test)) * ufl.dx
     L_u = (xi_c / dt_c) * ufl.inner(u_n, w_test) * ufl.dx \
-        + ufl.inner(sigma_active(Q_n), eps(w_test)) * ufl.dx
+          - ufl.inner(sigma_active(Q_n), eps(w_test)) * ufl.dx
 
     # ------------------------------------------------------------------
     # Nematic weak form
@@ -179,6 +193,11 @@ def run(p: Params, mesh=None, cell_tags=None, facet_tags=None, verbose=True):
     q_test = ufl.TestFunction(QS)
 
     u_np1_holder = fem.Function(V)  # updated with the mechanics solution each step
+
+    # Strain from the newly solved CG2 displacement.
+    strain_np1 = eps(u_np1_holder)
+    Hc_xx = -0.5 * gamma_c * (strain_np1[0, 0] - strain_np1[1, 1])
+    Hc_xy = -gamma_c * strain_np1[0, 1]
 
     v_expr = (u_np1_holder - u_n) / dt_c
     grad_v = ufl.grad(v_expr)
@@ -201,8 +220,8 @@ def run(p: Params, mesh=None, cell_tags=None, facet_tags=None, verbose=True):
     Q_rot_xx = cos_r * Q_n[0] - sin_r * Q_n[1]
     Q_rot_xy = sin_r * Q_n[0] + cos_r * Q_n[1]
 
-    rhs_xx = Q_rot_xx + dt_c * Gamma_c * Hb_xx
-    rhs_xy = Q_rot_xy + dt_c * Gamma_c * Hb_xy
+    rhs_xx = Q_rot_xx + dt_c * Gamma_c * (Hb_xx + Hc_xx)
+    rhs_xy = Q_rot_xy + dt_c * Gamma_c * (Hb_xy + Hc_xy)
 
     a_Q = ufl.inner(Q_trial, q_test) * ufl.dx \
         + dt_c * Gamma_c * K_c * ufl.inner(ufl.grad(Q_trial), ufl.grad(q_test)) * ufl.dx
@@ -228,6 +247,14 @@ def run(p: Params, mesh=None, cell_tags=None, facet_tags=None, verbose=True):
 
     import os
     os.makedirs(p.outdir, exist_ok=True)
+    if comm.rank == 0:
+        parameters = asdict(p)
+        parameters["outdir"] = os.fspath(p.outdir)
+        parameters["L"] = mesh_gen.L
+        parameters["epsilon0"] = p.d0 / (2.0 * mesh_gen.L)
+        with open(os.path.join(p.outdir, "parameters.json"), "w", encoding="utf-8") as f:
+            json.dump(parameters, f, indent=2)
+            f.write("\n")
     xdmf_path = os.path.join(p.outdir, "fields.xdmf")
     xdmf = io.XDMFFile(comm, xdmf_path, "w")
     xdmf.write_mesh(mesh)
